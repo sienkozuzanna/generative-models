@@ -46,6 +46,7 @@ class Generator(nn.Module):
             nn.Tanh(),
         ]
         self.conv = nn.Sequential(*layers)
+        self.apply(self._weights_init)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         """z: (B, latent_dim) -> img: (B, 3, H, W)"""
@@ -58,6 +59,14 @@ class Generator(nn.Module):
         """Sample n images from the prior."""
         z = torch.randn(n, self.latent_dim, device=device)
         return self(z)
+    
+    @staticmethod
+    def _weights_init(m):
+        if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+            nn.init.normal_(m.weight, 0.0, 0.02)
+        elif isinstance(m, nn.BatchNorm2d):
+            nn.init.normal_(m.weight, 1.0, 0.02)
+            nn.init.constant_(m.bias, 0)
 
 
 class Discriminator(nn.Module):
@@ -92,7 +101,16 @@ class Discriminator(nn.Module):
         # 4x4 spatial -> scalar logit
         layers.append(nn.Conv2d(in_ch, 1, 4, 1, 0, bias=False))
         self.net = nn.Sequential(*layers)
+        self.apply(self._weights_init)
 
     def forward(self, img: torch.Tensor) -> torch.Tensor:
         """img: (B, 3, H, W) -> logits: (B, 1, 1, 1)"""
         return self.net(img)
+    
+    @staticmethod
+    def _weights_init(m):
+        if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+            nn.init.normal_(m.weight, 0.0, 0.02)
+        elif isinstance(m, nn.BatchNorm2d):
+            nn.init.normal_(m.weight, 1.0, 0.02)
+            nn.init.constant_(m.bias, 0)
