@@ -7,6 +7,13 @@ from torchvision import transforms
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
+try:
+    import lpips
+    _lpips_fn = lpips.LPIPS(net='alex')
+except:
+    _lpips_fn = None
+
+
 class InceptionFeatureExtractor(nn.Module):
     """InceptionV3 truncated at the pool layer — returns 2048-dim features."""
 
@@ -162,3 +169,48 @@ def evaluate_model(generate_fn, real_loader, device, n_samples=5000):
     print("=" * 40)
 
     return results
+
+
+def latent_smoothness(zs: torch.Tensor):
+    """
+    zs: [T, D]
+    """
+    diffs = torch.norm(zs[1:] - zs[:-1], dim=1)
+    return diffs.mean().item()
+
+
+def pixel_smoothness(images: torch.Tensor):
+    """
+    images: [T, C, H, W]
+    """
+    diffs = torch.norm(images[1:] - images[:-1], dim=(1, 2, 3))
+    return diffs.mean().item()
+
+
+def lpips_smoothness(images: torch.Tensor, device="cpu"):
+    """
+    images: [T, C, H, W], expected range [-1, 1]
+    """
+    if _lpips_fn is None:
+        raise ImportError("Install lpips: pip install lpips")
+
+    _lpips_fn.to(device)
+
+    diffs = []
+    for t in range(len(images) - 1):
+        x1 = images[t:t+1].to(device)
+        x2 = images[t+1:t+2].to(device)
+        diffs.append(_lpips_fn(x1, x2).item())
+
+    return sum(diffs) / len(diffs)
+
+
+def interpolation_metrics(images, zs, device="cpu"):
+    """
+    Returns all metrics in one dict
+    """
+    return {
+        "latent_smoothness": latent_smoothness(zs),
+        "pixel_smoothness": pixel_smoothness(images),
+        "lpips_smoothness": lpips_smoothness(images, device=device),
+    }
