@@ -3,6 +3,7 @@ import json
 import numpy as np
 import torch
 from pathlib import Path
+import torch.nn as nn
 
 
 def set_seed(seed: int):
@@ -61,3 +62,10 @@ def run_multiseed(train_fn, config: dict, seeds: list, save_dir: str):
     save_results(all_results, save_dir / "all_seeds.json")
     print(f"\nAll seeds done. Results saved to {save_dir}")
     return all_results
+
+_gan_criterion = nn.BCEWithLogitsLoss()
+
+def gan_loss(logits: torch.Tensor, target_real: bool) -> torch.Tensor:
+    """Standard minimax GAN loss for one side (real or fake)."""
+    labels = torch.ones_like(logits) if target_real else torch.zeros_like(logits)
+    return _gan_criterion(logits, labels)
