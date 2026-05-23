@@ -75,10 +75,8 @@ def plot_vae_loss_curves(history: dict, title="VAE Training Curves", save_path=N
     plt.show()
 
 # Loss curves — multiseed (mean ± std)
-
-def plot_loss_curves_multiseed(seed_results: dict, loss_keys=("total", "recon", "kl"),
-    loss_labels=("Total Loss", "Reconstruction Loss", "KL Divergence"), title="VAE Training Curves (mean ± std)",
-    save_path=None):
+def plot_loss_curves_multiseed(seed_results: dict, loss_keys=("total",), loss_labels=("Loss",), 
+                               title="Training Curves (mean ± std)", save_path=None):
     """
     Plot mean ± std loss curves across multiple seeds.
 
@@ -94,6 +92,8 @@ def plot_loss_curves_multiseed(seed_results: dict, loss_keys=("total", "recon", 
     epochs = range(1, n_epochs + 1)
 
     fig, axes = plt.subplots(1, len(loss_keys), figsize=(5 * len(loss_keys), 4))
+    if len(loss_keys) == 1:
+        axes = [axes]
     fig.suptitle(title, fontsize=15, fontweight="bold", y=1.02)
 
     for ax, key, color, label in zip(axes, loss_keys, colors, loss_labels):
