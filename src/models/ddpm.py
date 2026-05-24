@@ -268,7 +268,8 @@ class DDPM(nn.Module):
         """
         steps = steps or self.T
         img_size  = self.unet.image_size
-        timesteps = torch.linspace(self.T - 1, 0, steps, dtype=torch.long, device=device)
+        timesteps = torch.linspace(self.T - 1, 0, steps, device=device).long()
+        timesteps = timesteps.clamp(min=0)
 
         x = torch.randn(n, 3, img_size, img_size, device=device)
 
@@ -283,7 +284,7 @@ class DDPM(nn.Module):
             x0_pred = (x - (1 - ab_t).sqrt() * eps_pred) / ab_t.sqrt()
             x0_pred = x0_pred.clamp(-1, 1)
 
-            if t_val > 0:
+            if t_val.item() > 0:
                 ab_prev = (
                     self.alpha_bar[timesteps[i + 1]]
                     if i + 1 < len(timesteps)
@@ -294,7 +295,8 @@ class DDPM(nn.Module):
                   + (alpha_t.sqrt() * (1 - ab_prev) / (1 - ab_t)) * x
                 )
                 var = (1 - ab_prev) / (1 - ab_t) * beta_t
-                x = mean + var.sqrt() * torch.randn_like(x)
+                noise = torch.randn_like(x) if t_val.item() > 0 else 0
+                x = mean + var.sqrt() * noise
             else:
                 x = x0_pred
 
@@ -313,7 +315,8 @@ class DDPM(nn.Module):
             Tensor (N, 3, H, W) w range [-1, 1].
         """
         steps = steps or self.T
-        timesteps = torch.linspace(self.T - 1, 0, steps, dtype=torch.long, device=device)
+        timesteps = torch.linspace(self.T - 1, 0, steps, device=device).long()
+        timesteps = timesteps.clamp(min=0)
         x = x.to(device)
 
         for i, t_val in enumerate(timesteps):
@@ -327,7 +330,7 @@ class DDPM(nn.Module):
             x0_pred = (x - (1 - ab_t).sqrt() * eps_pred) / ab_t.sqrt()
             x0_pred = x0_pred.clamp(-1, 1)
 
-            if t_val > 0:
+            if t_val.item() > 0:
                 ab_prev = (
                     self.alpha_bar[timesteps[i + 1]]
                     if i + 1 < len(timesteps)
@@ -336,7 +339,8 @@ class DDPM(nn.Module):
                 mean = ((ab_prev.sqrt() * beta_t  / (1 - ab_t)) * x0_pred
                 + (alpha_t.sqrt() * (1 - ab_prev) / (1 - ab_t)) * x)
                 var = (1 - ab_prev) / (1 - ab_t) * beta_t
-                x = mean + var.sqrt() * torch.randn_like(x)
+                noise = torch.randn_like(x) if t_val.item() > 0 else 0
+                x = mean + var.sqrt() * noise
             else:
                 x = x0_pred
 
