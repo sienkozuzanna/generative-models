@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -13,10 +14,7 @@ class SinusoidalPosEmb(nn.Module):
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         """t: (B,) int64 -> emb: (B, dim)"""
         half = self.dim // 2
-        freqs = torch.exp(
-            -torch.arange(half, device=t.device)
-            * (torch.log(torch.tensor(10000.0)) / (half - 1))
-        )
+        freqs = torch.exp(-torch.arange(half, device=t.device) * (torch.log(torch.tensor(10000.0)) / (half - 1)))
         args = t[:, None].float() * freqs[None]
         return torch.cat([args.sin(), args.cos()], dim=-1)
 
@@ -50,7 +48,7 @@ class SelfAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
-        h = self.norm(x).view(B, C, H * W).transpose(1, 2)  # (B, HW, C)
+        h = self.norm(x).view(B, C, H * W).transpose(1, 2)
         h, _ = self.attn(h, h, h)
         return x + h.transpose(1, 2).view(B, C, H, W)
 
@@ -74,9 +72,11 @@ class UNet(nn.Module):
     """
 
     def __init__(self, image_size: int = 64, in_channels: int = 3, base_channels: int = 128,
-        channel_mults: tuple = (1, 2, 2, 2), num_res_blocks: int = 2, attn_resolutions: tuple = (16, 8)):
+        channel_mults: tuple = (1, 2, 2, 2), num_res_blocks: int = 2,
+        attn_resolutions: tuple = (16, 8)):
         super().__init__()
         self.image_size = image_size
+        self.num_res_blocks = num_res_blocks
         emb_dim = base_channels * 4
 
         self.time_mlp = nn.Sequential(
@@ -92,7 +92,7 @@ class UNet(nn.Module):
         self.down_samples = nn.ModuleList()
         res = image_size
         in_ch = base_channels
-        self._skip_chs = [in_ch]
+        self._skip_chs = []
 
         for mult in channel_mults:
             out_ch = base_channels * mult
@@ -103,18 +103,18 @@ class UNet(nn.Module):
                 ]))
                 self._skip_chs.append(out_ch)
                 in_ch = out_ch
+            self._skip_chs.append(in_ch)
             self.down_samples.append(
                 nn.Conv2d(in_ch, in_ch, 3, stride=2, padding=1)
             )
-            self._skip_chs.append(in_ch)
             res //= 2
 
         self.mid_res1 = ResBlock(in_ch, in_ch, emb_dim)
         self.mid_attn = SelfAttention(in_ch)
         self.mid_res2 = ResBlock(in_ch, in_ch, emb_dim)
 
-        self.up_blocks   = nn.ModuleList()
-        self.up_samples  = nn.ModuleList()
+        self.up_blocks  = nn.ModuleList()
+        self.up_samples = nn.ModuleList()
         skip_chs = list(self._skip_chs)
 
         for mult in reversed(channel_mults):
@@ -124,7 +124,13 @@ class UNet(nn.Module):
                 nn.Conv2d(in_ch, in_ch, 3, padding=1),
             ))
             res *= 2
-            for i in range(num_res_blocks + 1):
+            skip_ch = skip_chs.pop()
+            self.up_blocks.append(nn.ModuleList([
+                ResBlock(in_ch + skip_ch, out_ch, emb_dim),
+                SelfAttention(out_ch) if res in attn_resolutions else nn.Identity(),
+            ]))
+            in_ch = out_ch
+            for _ in range(num_res_blocks):
                 skip_ch = skip_chs.pop()
                 self.up_blocks.append(nn.ModuleList([
                     ResBlock(in_ch + skip_ch, out_ch, emb_dim),
@@ -136,38 +142,36 @@ class UNet(nn.Module):
         self.out_conv = nn.Conv2d(in_ch, in_channels, 1)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        """x: (B,3,H,W), t: (B,) int64 -> noise_pred: (B,3,H,W)"""
+        """x: (B, 3, H, W), t: (B,) int64 -> noise_pred: (B, 3, H, W)"""
         emb = self.time_mlp(t)
         x   = self.init_conv(x)
 
-        skips = [x]
-        ds_iter  = iter(self.down_samples)
-        block_i  = 0
-        for level_i in range(len(self.down_samples)):
-            for _ in range(len([b for b in self.down_blocks]) // len(self.down_samples)):
-                if block_i >= len(self.down_blocks):
-                    break
+        skips = []
+        block_i = 0
+        for ds in self.down_samples:
+            for _ in range(self.num_res_blocks):
                 blk = self.down_blocks[block_i]
                 x = blk[0](x, emb)
                 x = blk[1](x)
                 skips.append(x)
                 block_i += 1
-            x = next(ds_iter)(x)
             skips.append(x)
+            x = ds(x)
 
         x = self.mid_res1(x, emb)
         x = self.mid_attn(x)
         x = self.mid_res2(x, emb)
 
-        us_iter = iter(self.up_samples)
         block_i = 0
-        n_mults = len(self.down_samples)
-        blocks_per_level = len(self.up_blocks) // n_mults
-        for level_i in range(n_mults):
-            x = next(us_iter)(x)
-            for _ in range(blocks_per_level):
-                if block_i >= len(self.up_blocks):
-                    break
+        for us in self.up_samples:
+            x = us(x)
+            skip = skips.pop()
+            x = torch.cat([x, skip], dim=1)
+            blk = self.up_blocks[block_i]
+            x = blk[0](x, emb)
+            x = blk[1](x)
+            block_i += 1
+            for _ in range(self.num_res_blocks):
                 skip = skips.pop()
                 x = torch.cat([x, skip], dim=1)
                 blk = self.up_blocks[block_i]
@@ -178,8 +182,26 @@ class UNet(nn.Module):
         return self.out_conv(F.silu(self.out_norm(x)))
 
 
+def linear_schedule(T: int, beta_start: float, beta_end: float) -> torch.Tensor:
+    """Linear noise schedule (Ho et al. 2020)."""
+    return torch.linspace(beta_start, beta_end, T)
+
+
+def cosine_schedule(T: int, s: float = 8e-3) -> torch.Tensor:
+    """Cosine noise schedule (Nichol & Dhariwal 2021).
+
+    f(t) = cos^2( (t/T + s) / (1 + s) * pi/2 )
+    betas clipped to [0, 0.999] to avoid singularities.
+    """
+    steps = torch.arange(T + 1, dtype=torch.float64)
+    f = torch.cos((steps / T + s) / (1 + s) * math.pi / 2) ** 2
+    alpha_bar = f / f[0]
+    betas = 1 - alpha_bar[1:] / alpha_bar[:-1]
+    return betas.clamp(0, 0.999).float()
+
+
 class DDPM(nn.Module):
-    """DDPM (Ho et al. 2020) with linear noise schedule.
+    """DDPM (Ho et al. 2020) with configurable noise schedule.
 
     Wraps UNet with:
     - forward diffusion q(x_t | x_0)  — used during training
@@ -190,24 +212,33 @@ class DDPM(nn.Module):
     Args:
         unet: UNet noise predictor.
         T: Total number of diffusion timesteps.
-        beta_start: Start value of linear beta schedule.
-        beta_end: End value of linear beta schedule.
+        schedule: Noise schedule type — 'linear' or 'cosine'.
+        beta_start: Start value (only for linear schedule).
+        beta_end: End value (only for linear schedule).
     """
 
-    def __init__(self, unet: UNet, T: int = 1000, beta_start: float = 1e-4, beta_end: float = 2e-2):
+    def __init__(self, unet: UNet, T: int = 1000, schedule: str = "linear",
+                 beta_start: float = 1e-4, beta_end: float = 2e-2):
         super().__init__()
         self.unet = unet
         self.T = T
+        self.schedule = schedule
 
-        betas = torch.linspace(beta_start, beta_end, T)
-        alphas = 1.0 - betas
+        if schedule == "linear":
+            betas = linear_schedule(T, beta_start, beta_end)
+        elif schedule == "cosine":
+            betas = cosine_schedule(T)
+        else:
+            raise ValueError(f"Unknown schedule: '{schedule}'. Use 'linear' or 'cosine'.")
+
+        alphas    = 1.0 - betas
         alpha_bar = torch.cumprod(alphas, dim=0)
 
         self.register_buffer("betas", betas)
         self.register_buffer("alphas", alphas)
         self.register_buffer("alpha_bar", alpha_bar)
         self.register_buffer("sqrt_alpha_bar", alpha_bar.sqrt())
-        self.register_buffer("sqrt_one_minus_alpha_bar",(1 - alpha_bar).sqrt())
+        self.register_buffer("sqrt_one_minus_alpha_bar", (1 - alpha_bar).sqrt())
 
     def q_sample(self, x0: torch.Tensor, t: torch.Tensor, eps: torch.Tensor) -> torch.Tensor:
         """Forward process: x_t = sqrt(alpha_bar_t)*x0 + sqrt(1-alpha_bar_t)*eps"""
@@ -220,7 +251,7 @@ class DDPM(nn.Module):
         B = x0.size(0)
         t = torch.randint(0, self.T, (B,), device=x0.device)
         eps = torch.randn_like(x0)
-        xt = self.q_sample(x0, t, eps)
+        xt  = self.q_sample(x0, t, eps)
         return F.mse_loss(self.unet(xt, t), eps)
 
     @torch.no_grad()
@@ -230,10 +261,10 @@ class DDPM(nn.Module):
         Args:
             n: Number of images to generate.
             device: Target device.
-            steps: Number of denoising steps (subset of T for speed). None = full T steps.
+            steps: Denoising steps (subset of T for speed). None = full T steps.
 
         Returns:
-            Tensor of shape (n, 3, H, W) in range [-1, 1].
+            Tensor (n, 3, H, W) in range [-1, 1].
         """
         steps = steps or self.T
         img_size  = self.unet.image_size
@@ -245,11 +276,10 @@ class DDPM(nn.Module):
             t = t_val.expand(n)
             eps_pred = self.unet(x, t)
 
-            beta_t = self.betas[t_val]
+            beta_t  = self.betas[t_val]
             alpha_t = self.alphas[t_val]
             ab_t = self.alpha_bar[t_val]
 
-            # predict x0 from noise prediction
             x0_pred = (x - (1 - ab_t).sqrt() * eps_pred) / ab_t.sqrt()
             x0_pred = x0_pred.clamp(-1, 1)
 
@@ -263,8 +293,8 @@ class DDPM(nn.Module):
                     (ab_prev.sqrt() * beta_t  / (1 - ab_t)) * x0_pred
                   + (alpha_t.sqrt() * (1 - ab_prev) / (1 - ab_t)) * x
                 )
-                var  = (1 - ab_prev) / (1 - ab_t) * beta_t
-                x    = mean + var.sqrt() * torch.randn_like(x)
+                var = (1 - ab_prev) / (1 - ab_t) * beta_t
+                x = mean + var.sqrt() * torch.randn_like(x)
             else:
                 x = x0_pred
 
