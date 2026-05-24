@@ -299,3 +299,45 @@ class DDPM(nn.Module):
                 x = x0_pred
 
         return x.clamp(-1, 1)
+    
+    @torch.no_grad()
+    def generate_from_noise(self, x: torch.Tensor, device, steps: int = None) -> torch.Tensor:
+        """Denoising starting from given noise x instead of pure Gaussian.
+        
+        Args:
+            x: (N, 3, H, W) — tensor szumu, np. interpolowane wektory
+            device: target device
+            steps: denoising steps
+        
+        Returns:
+            Tensor (N, 3, H, W) w range [-1, 1].
+        """
+        steps = steps or self.T
+        timesteps = torch.linspace(self.T - 1, 0, steps, dtype=torch.long, device=device)
+        x = x.to(device)
+
+        for i, t_val in enumerate(timesteps):
+            t = t_val.expand(x.size(0))
+            eps_pred = self.unet(x, t)
+
+            beta_t = self.betas[t_val]
+            alpha_t = self.alphas[t_val]
+            ab_t = self.alpha_bar[t_val]
+
+            x0_pred = (x - (1 - ab_t).sqrt() * eps_pred) / ab_t.sqrt()
+            x0_pred = x0_pred.clamp(-1, 1)
+
+            if t_val > 0:
+                ab_prev = (
+                    self.alpha_bar[timesteps[i + 1]]
+                    if i + 1 < len(timesteps)
+                    else torch.tensor(1.0, device=device)
+                )
+                mean = ((ab_prev.sqrt() * beta_t  / (1 - ab_t)) * x0_pred
+                + (alpha_t.sqrt() * (1 - ab_prev) / (1 - ab_t)) * x)
+                var = (1 - ab_prev) / (1 - ab_t) * beta_t
+                x = mean + var.sqrt() * torch.randn_like(x)
+            else:
+                x = x0_pred
+
+        return x.clamp(-1, 1)
